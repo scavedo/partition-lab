@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Partition Lab</title>
+<meta name="description" content="An interactive model of network partitions: CRDT merging versus majority writes and locks. The simulation runs in Rust compiled to WebAssembly.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body data-mode="AP">
+<div class="wrap">
+  <header class="top">
+    <h1>Partition Lab</h1>
+    <p class="lede">Three devices share one record: a cabin note and a count of items sold. Cut the network between them, keep working, then reconnect. Switch modes to see what choosing consistency or availability costs during a split. The simulation runs in Rust, compiled to WebAssembly.</p>
+    <div class="modebar">
+      <div class="seg" role="group" aria-label="Mode">
+        <button type="button" id="mode-ap" aria-pressed="true">Availability (AP)</button>
+        <button type="button" id="mode-cp" aria-pressed="false">Consistency (CP)</button>
+      </div>
+      <p class="modehint" id="modehint">Every device always accepts writes. Copies may differ during a split and merge when they reconnect.</p>
+      <button type="button" class="btn" id="reset">Reset</button>
+    </div>
+  </header>
+
+  <p class="loaderr" id="loaderr" hidden>The simulation engine didn’t load. Try reloading the page.</p>
+
+  <section class="bench">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Network</h2>
+        <span class="status" id="netstatus" role="status">Loading…</span>
+      </div>
+      <svg class="topo" id="topo" viewBox="0 0 400 270" role="img" aria-label="Three devices connected in a triangle. Click a link to cut or restore it."><g id="topo-main"></g><g id="packets"></g></svg>
+      <div class="links" id="linkbtns"></div>
+      <div class="links">
+        <button type="button" class="btn" data-preset="0">Isolate A</button>
+        <button type="button" class="btn" data-preset="1">Isolate B</button>
+        <button type="button" class="btn" data-preset="2">Isolate C</button>
+        <button type="button" class="btn primary" data-preset="heal">Reconnect all</button>
+      </div>
+    </div>
+    <div class="panel try">
+      <h2>Try this</h2>
+      <ol id="tryap">
+        <li><b>Lost updates.</b> Isolate C. Sell 2 on A and 1 on C. Reconnect all. The counter keeps all 3 sales; the plain number keeps only the last writer’s value.</li>
+        <li><b>Concurrent edits.</b> Isolate C, save a different note on A and on C, then reconnect. Every device settles on the same note: the one with the higher stamp.</li>
+        <li><b>Always writable.</b> While C is cut off it keeps accepting sales and notes. Nothing is refused; the copies just differ until they meet again.</li>
+      </ol>
+      <ol id="trycp" hidden>
+        <li><b>Refused writes.</b> Isolate C and try to sell on C. It can’t reach a majority (2 of 3), so the write is refused. A and B keep working.</li>
+        <li><b>Catching up.</b> Sell on A while C is cut off, then reconnect. C adopts the newer version; no merging is needed because only one side could write.</li>
+        <li><b>A lock meets a partition.</b> Take the edit lock on C, then isolate C. C holds the lock but can’t write; A and B can’t edit the note either. Use Expire lease on A to recover.</li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="devices" id="devices" aria-label="Devices"></section>
+
+  <section class="lower">
+    <div class="panel">
+      <div class="panel-head"><h2>What happened</h2><span class="kind">newest first</span></div>
+      <ol id="log" aria-live="polite"></ol>
+    </div>
+    <div class="panel code">
+      <h2>How each mode decides</h2>
+      <p>Availability mode: every device writes locally and merges whole states when it can reach another device. Each merge is commutative, associative and idempotent, so copies converge in any order. Excerpt from <code>src/crdt.rs</code>:</p>
+<pre><code>// Last write wins: Stamp is (counter, device), compared in that order,
+// so every replica picks the same winner for concurrent writes.
+impl&lt;T: Clone&gt; Merge for LwwRegister&lt;T&gt; {
+    fn merge(&amp;mut self, other: &amp;Self) {
+        if other.stamp &gt; self.stamp {
+            self.value = other.value.clone();
+            self.stamp = other.stamp;
+        }
+    }
+}
+
+// PN-counter: one increment and one decrement slot per device.
+impl Merge for PnCounter {
+    fn merge(&amp;mut self, other: &amp;Self) {
+        for d in 0..N {
+            self.inc[d] = self.inc[d].max(other.inc[d]);
+            self.dec[d] = self.dec[d].max(other.dec[d]);
+        }
+    }
+}</code></pre>
+      <p>Consistency mode: a write must reach a majority (2 of 3). The cut-off device refuses writes, so there is never anything to merge. Editing the note also needs the edit lock, a mutex kept in the same majority-replicated state. Simplified from <code>Lab::cp_write</code> in <code>src/lib.rs</code>:</p>
+<pre><code>let group = self.net.group_of(i);
+if group.len() * 2 &lt;= N {
+    return refuse("can’t reach a majority");
+}
+let mut next = newest_copy_in(group);
+change(&amp;mut next)?;
+next.version += 1;
+// copy `next` to every device in the group</code></pre>
+      <p class="source" id="source">The repository includes property tests that check the merge laws, convergence after any partition, and that consistency mode never splits into two histories.</p>
+    </div>
+  </section>
+
+  <footer>Built by Samuel Cavedo as a teaching model of partitions, CRDT merges and locking. Not production code: sync here is instant whole-state merging, with no real network.</footer>
+</div>
+</body>
+</html>
